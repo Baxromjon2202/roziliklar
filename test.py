@@ -1,6 +1,3 @@
-import ccxt
-import pandas as pd
-import numpy as np
 import time
 import requests
 import datetime
@@ -12,20 +9,17 @@ from flask import Flask
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8561975465:AAGut6mQUfLfTcIOz90eesdhLdQ5iN52pRc")
 CHAT_ID = os.environ.get("CHAT_ID", "6931604709")
 
-binance = ccxt.binance()
-
-targets = [
-    'BTC/USDT',
-    'ETH/USDT',
-    'SOL/USDT',
-    'XRP/USDT',
-    'ADA/USDT',
-    'DOGE/USDT',
-    'AVAX/USDT',
-    'LINK/USDT'
-]
-
-TIMEFRAME = '1h'
+# CoinGecko uchun tanga ID'lari
+coins = {
+    'BTC/USDT': 'bitcoin',
+    'ETH/USDT': 'ethereum',
+    'SOL/USDT': 'solana',
+    'XRP/USDT': 'ripple',
+    'ADA/USDT': 'cardano',
+    'DOGE/USDT': 'dogecoin',
+    'AVAX/USDT': 'avalanche-2',
+    'LINK/USDT': 'chainlink'
+}
 
 # Flask veb-server (Render uchun)
 app = Flask(__name__)
@@ -38,13 +32,6 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
 def send_telegram_message(message, chat_id=CHAT_ID):
     """Telegramga xabar yuborish"""
     try:
@@ -55,44 +42,37 @@ def send_telegram_message(message, chat_id=CHAT_ID):
         print(f"Xatolik (Telegram): {e}")
 
 def get_market_analysis_text():
-    """Bozorni tahlil qilib, matn qaytaruvchi funksiya"""
-    report = f"📊 *Binance Bozor Tahlili* \n🕒 `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+    """CoinGecko orqali bozor narxlarini olish va tahlil qilish"""
+    report = f"📊 *Kripto Bozor Tahlili* \n🕒 `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
     
-    for symbol in targets:
-        try:
-            bars = binance.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=50)
-            df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            current_price = df['close'].iloc[-1]
-            df['MA20'] = df['close'].rolling(window=20).mean()
-            df['RSI'] = calculate_rsi(df['close'], period=14)
-            
-            bb_std = df['close'].rolling(window=20).std()
-            bb_upper = df['MA20'] + (bb_std * 2)
-            bb_lower = df['MA20'] - (bb_std * 2)
-            
-            ma_20 = df['MA20'].iloc[-1]
-            current_rsi = df['RSI'].iloc[-1]
-            bb_upper_val = bb_upper.iloc[-1]
-            bb_lower_val = bb_lower.iloc[-1]
-            
-            report += f"🔹 *{symbol}*\n"
-            report += f"  • Narx: `{current_price:.2f} USDT`\n"
-            report += f"  • RSI: `{current_rsi:.2f}`\n"
-            
-            signal = "⚪ Aniq yo'nalish yo'q"
-            if current_price <= bb_lower_val and current_rsi < 35:
-                signal = "🟢 Katta imkoniyat (Oversold)"
-            elif current_price >= bb_upper_val and current_rsi > 65:
-                signal = "🔴 Ehtiyot bo'ling (Overbought)"
-            elif current_price > ma_20 and current_rsi < 60:
-                signal = "🔵 Barqaror o'sish (HOLD)"
+    try:
+        # Barcha tangalar narxini bitta so'rovda olamiz
+        ids = ",".join(coins.values())
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_24hr_change=true"
+        response = requests.get(url, timeout=10).json()
+        
+        for symbol, coin_id in coins.items():
+            if coin_id in response:
+                price = response[coin_id]['usd']
+                change_24h = response[coin_id].get('usd_24h_change', 0)
                 
-            report += f"  • Signal: {signal}\n\n"
-            
-        except Exception as e:
-            print(f"Xatolik {symbol}: {e}")
-            report += f"🔹 *{symbol}* - Ma'lumot olishda xatolik\n\n"
+                report += f"🔹 *{symbol}*\n"
+                report += f"  • Narx: `{price:,.2f} USDT`\n"
+                report += f"  • 24h O'zgarish: `{change_24h:+.2f}%`\n"
+                
+                signal = "⚪ Barqaror"
+                if change_24h > 3:
+                    signal = "🟢 Faol o'sishda (Bullish)"
+                elif change_24h < -3:
+                    signal = "🔴 Pasayishda (Bearish)"
+                
+                report += f"  • Holat: {signal}\n\n"
+            else:
+                report += f"🔹 *{symbol}* - Ma'lumot topilmadi\n\n"
+                
+    except Exception as e:
+        print(f"Xatolik (API): {e}")
+        report += "❌ Bozor ma'lumotlarini olishda vaqtinchalik xatolik yuz berdi."
 
     return report
 
@@ -114,16 +94,16 @@ def check_telegram_commands():
                         
                         if "/status" in text or "/start" in text:
                             print(f"Buyruq keldi: {text}")
-                            reply = "⏳ Bozordan ma'lumotlar olinmoqda, biroz kuting...\n\n" + get_market_analysis_text()
+                            reply = "⏳ Ma'lumotlar yuklanmoqda...\n\n" + get_market_analysis_text()
                             send_telegram_message(reply, chat_id)
         except Exception as e:
             print(f"Buyruqni o'qishda xatolik: {e}")
         time.sleep(2)
 
 if __name__ == "__main__":
-    print("Mukammal Kripto Tahlilchi Bot ishga tushdi...")
+    print("Kripto Tahlilchi Bot ishga tushdi...")
     
-    # 1. Render uchun veb-serverni ishga tushiramiz
+    # 1. Veb-serverni ishga tushiramiz
     web_thread = threading.Thread(target=run_web)
     web_thread.daemon = True
     web_thread.start()
@@ -133,6 +113,5 @@ if __name__ == "__main__":
     t.daemon = True
     t.start()
     
-    # Asosiy oqim uxlab qolmasligi uchun cheksiz sikl
     while True:
         time.sleep(1)

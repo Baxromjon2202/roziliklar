@@ -5,15 +5,15 @@ import time
 import requests
 import datetime
 import threading
+import os
 from flask import Flask
 
 # --- TELEGRAM SOZLAMALARI ---
-BOT_TOKEN = "8561975465:AAGut6mQUfLfTcIOz90eesdhLdQ5iN52pRc"  
-CHAT_ID = "6931604709"                        
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8561975465:AAGut6mQUfLfTcIOz90eesdhLdQ5iN52pRc")
+CHAT_ID = os.environ.get("CHAT_ID", "6931604709")
 
 binance = ccxt.binance()
 
-# Tangalar ro'yxati (Barcha kerakli tangalar)
 targets = [
     'BTC/USDT',
     'ETH/USDT',
@@ -27,16 +27,16 @@ targets = [
 
 TIMEFRAME = '1h'
 
-# Flask veb-server (Render bepul ishlashi uchun shart)
+# Flask veb-server (Render uchun)
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot muvaffaqiyatli ishlayapti!"
+    return "Bot muvaffaqiyatli ishlayapti va tahlilga tayyor!"
 
 def run_web():
-    app.run(host='0.0.0.0', port=10000)
-
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -45,23 +45,22 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def send_telegram_message(message):
+def send_telegram_message(message, chat_id=CHAT_ID):
     """Telegramga xabar yuborish"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-        requests.post(url, json=payload)
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Xatolik (Telegram): {e}")
 
 def get_market_analysis_text():
     """Bozorni tahlil qilib, matn qaytaruvchi funksiya"""
     report = f"📊 *Binance Bozor Tahlili* \n🕒 `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
-    log_data = []
-
+    
     for symbol in targets:
         try:
-            bars = binance.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
+            bars = binance.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=50)
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
             current_price = df['close'].iloc[-1]
@@ -84,35 +83,18 @@ def get_market_analysis_text():
             signal = "⚪ Aniq yo'nalish yo'q"
             if current_price <= bb_lower_val and current_rsi < 35:
                 signal = "🟢 Katta imkoniyat (Oversold)"
-                report += f"  • Signal: {signal}\n\n"
             elif current_price >= bb_upper_val and current_rsi > 65:
                 signal = "🔴 Ehtiyot bo'ling (Overbought)"
-                report += f"  • Signal: {signal}\n\n"
             elif current_price > ma_20 and current_rsi < 60:
                 signal = "🔵 Barqaror o'sish (HOLD)"
-                report += f"  • Signal: {signal}\n\n"
-            else:
-                report += f"  • Signal: {signal}\n\n"
-
-            log_data.append(f"{datetime.datetime.now()},{symbol},{current_price},{current_rsi},{signal}")
+                
+            report += f"  • Signal: {signal}\n\n"
             
         except Exception as e:
             print(f"Xatolik {symbol}: {e}")
-
-    # Tarixni faylga yozish
-    with open("trade_history.csv", "a", encoding="utf-8") as f:
-        for line in log_data:
-            f.write(line + "\n")
+            report += f"🔹 *{symbol}* - Ma'lumot olishda xatolik\n\n"
 
     return report
-
-def background_scheduler():
-    """Avtomatik ravishda vaqt oralig'ida xabar yuborib turuvchi funksiya"""
-    while True:
-        print("Avtomatik tahlil bajarilmoqda...")
-        report = get_market_analysis_text()
-        send_telegram_message(report)
-        time.sleep(360) # 360 soniya (6 daqiqa)
 
 def check_telegram_commands():
     """Telegramdan kelgan buyruqlarni tekshirib turish (/status)"""
@@ -121,7 +103,7 @@ def check_telegram_commands():
     while True:
         try:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=30"
-            response = requests.get(url).json()
+            response = requests.get(url, timeout=35).json()
             
             if "result" in response:
                 for result in response["result"]:
@@ -130,10 +112,10 @@ def check_telegram_commands():
                         text = result["message"]["text"]
                         chat_id = result["message"]["chat"]["id"]
                         
-                        if text == "/status" or text == "/start":
-                            reply = "Salom! Siz so'ragan joriy bozor tahlili:\n\n" + get_market_analysis_text()
-                            ans_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                            requests.post(ans_url, json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
+                        if "/status" in text or "/start" in text:
+                            print(f"Buyruq keldi: {text}")
+                            reply = "⏳ Bozordan ma'lumotlar olinmoqda, biroz kuting...\n\n" + get_market_analysis_text()
+                            send_telegram_message(reply, chat_id)
         except Exception as e:
             print(f"Buyruqni o'qishda xatolik: {e}")
         time.sleep(2)
@@ -146,10 +128,11 @@ if __name__ == "__main__":
     web_thread.daemon = True
     web_thread.start()
     
-    # 2. Avtomatik xabar yuborishni ishga tushiramiz
-    t = threading.Thread(target=background_scheduler)
+    # 2. Telegram buyruqlarini tinglashni ishga tushiramiz
+    t = threading.Thread(target=check_telegram_commands)
     t.daemon = True
     t.start()
     
-    # 3. Telegram buyruqlarini tinglaymiz
-    check_telegram_commands()
+    # Asosiy oqim uxlab qolmasligi uchun cheksiz sikl
+    while True:
+        time.sleep(1)
